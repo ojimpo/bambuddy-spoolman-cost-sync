@@ -1,0 +1,26 @@
+# Example: drop this service into your existing Spoolman/Bambuddy docker-compose
+# stack. Both Spoolman and Bambuddy must be reachable on the same Docker network
+# (here `filament-net`).
+
+services:
+  cost-sync:
+    image: python:3.13-alpine
+    container_name: spoolman-cost-sync
+    restart: unless-stopped
+    networks:
+      - filament-net
+    volumes:
+      - ./cost_sync.py:/app/cost_sync.py:ro
+    environment:
+      - SPOOLMAN_URL=http://spoolman:8000
+      - BAMBUDDY_URL=http://bambuddy:8000
+      - SLEEP_SECONDS=600
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Tokyo
+    command: python /app/cost_sync.py
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+networks:
+  filament-net:
+    external: true
