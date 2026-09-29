@@ -15,6 +15,7 @@ services:
       - SPOOLMAN_URL=http://spoolman:8000
       - BAMBUDDY_URL=http://bambuddy:8000
       - SLEEP_SECONDS=600
+      # - COST_SYNC=0   # skip the cost_per_kg sync, keep only the lot_nr -> extra.tag migration
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Tokyo
     command: python /app/cost_sync.py

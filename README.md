@@ -2,6 +2,15 @@
 
 A small sidecar that copies per-spool prices from [Spoolman](https://github.com/Donkie/Spoolman) into [Bambuddy](https://github.com/MaziGGy/Bambuddy)'s local `cost_per_kg` field, so that Bambuddy's per-print cost calculation reflects what you actually paid for each spool.
 
+> **Status (2026-09-29): probably no longer needed on current Bambuddy.**
+> Bambuddy 1.2.6b1 in Spoolman mode computes per-print cost from Spoolman's `price` directly
+> (`_spool_cost_per_gram` in `services/spoolman_tracking.py`: the spool's `price` wins over `filament.price`,
+> divided by `filament.weight`). The archive costs of spools that this sidecar *skipped* ("no matching
+> Bambuddy spool") matched their Spoolman prices exactly, so the sync was not what produced them.
+> The `cost_per_kg` sync below only touches Bambuddy's **built-in** inventory table, which Spoolman mode
+> does not use. Set `COST_SYNC=0` to turn it off; the `lot_nr` -> `extra.tag` migration keeps running.
+> Verify against your own archives before relying on this.
+
 ## Why this exists
 
 When Bambuddy is integrated with Spoolman, the two systems each track filament inventory but they don't share cost information:
@@ -71,6 +80,7 @@ services:
       - SPOOLMAN_URL=http://spoolman:8000
       - BAMBUDDY_URL=http://bambuddy:8000
       - SLEEP_SECONDS=600
+      # - COST_SYNC=0   # skip the cost_per_kg sync, keep only the lot_nr -> extra.tag migration
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Tokyo
     command: python /app/cost_sync.py

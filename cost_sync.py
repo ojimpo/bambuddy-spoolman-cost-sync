@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-Spoolman → Bambuddy cost_per_kg sync.
+Spoolman → Bambuddy cost_per_kg sync + MrBambuSpoolPal lot_nr migration.
 
-Reads Spoolman spool prices and back-computes cost_per_kg = price / (initial_weight/1000),
-then PATCHes the matching Bambuddy spool. Matching uses Spoolman's extra.tag against
-Bambuddy's tray_uuid (32-char Bambu spool UUID, used by Bambuddy's RFID auto-create)
-and tag_uid (16-char RFID chip UID, sometimes written by MrBambuSpoolPal).
+Two jobs per loop iteration:
+1. Migrate Spoolman's native `lot_nr` (where MrBambuSpoolPal v1.1 mistakenly writes
+   the Bambu tray_uuid) into `extra.tag`, so Bambuddy's tag-based lookup matches
+   pre-registered spools at AMS load time instead of creating duplicates.
+2. Back-compute cost_per_kg = price / (initial_weight/1000) and PATCH the matching
+   Bambuddy spool. Matching uses Spoolman's extra.tag against Bambuddy's tray_uuid
+   (32-char) and tag_uid (16-char).
 
-Idempotent: PATCH only fires when the value differs by >= 0.01.
+Idempotent: cost PATCH only fires when the value differs by >= 0.01; lot_nr migration
+only fires when extra.tag is empty and lot_nr looks like a 32-char hex tray_uuid.
 Runs in a loop with SLEEP_SECONDS interval.
 """
 from __future__ import annotations
@@ -23,6 +27,9 @@ from typing import Any
 SPOOLMAN_URL = os.environ.get("SPOOLMAN_URL", "http://spoolman:8000").rstrip("/")
 BAMBUDDY_URL = os.environ.get("BAMBUDDY_URL", "http://bambuddy:8000").rstrip("/")
 SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "600"))
+# Set COST_SYNC=0 when Bambuddy reads Spoolman prices itself (Spoolman mode) and
+# only the lot_nr -> extra.tag migration is still wanted.
+COST_SYNC = os.environ.get("COST_SYNC", "1") != "0"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("cost_sync")
@@ -56,8 +63,54 @@ def _spoolman_tag(spool: dict) -> str | None:
     return _normalize_uuid(tag)
 
 
+def _is_tray_uuid(value: str | None) -> bool:
+    if not value or len(value) != 32:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
+def migrate_lot_nr_to_tag(sm_spools: list[dict]) -> int:
+    # MrBambuSpoolPal v1.1 writes the Bambu tray_uuid to Spoolman's native `lot_nr`
+    # field, but Bambuddy looks up spools via `extra.tag`. Move it over so the
+    # next AMS load matches the pre-registered spool instead of duplicating it.
+    migrated = 0
+    for sm in sm_spools:
+        if sm.get("archived"):
+            continue
+        lot_nr = sm.get("lot_nr")
+        if not _is_tray_uuid(lot_nr):
+            continue
+        if _spoolman_tag(sm):
+            continue
+        new_extra = dict(sm.get("extra") or {})
+        new_extra["tag"] = json.dumps(lot_nr.upper())
+        log.info("Migrating lot_nr -> extra.tag on Spoolman id=%s: %s", sm.get("id"), lot_nr)
+        try:
+            _http_json(
+                "PATCH",
+                f"{SPOOLMAN_URL}/api/v1/spool/{sm['id']}",
+                {"lot_nr": None, "extra": new_extra},
+            )
+            migrated += 1
+        except urllib.error.HTTPError as e:
+            log.error("PATCH (lot_nr migration) failed for Spoolman id=%s: HTTP %s %s", sm.get("id"), e.code, e.reason)
+        except urllib.error.URLError as e:
+            log.error("PATCH (lot_nr migration) failed for Spoolman id=%s: %s", sm.get("id"), e.reason)
+    return migrated
+
+
 def sync_once() -> None:
     sm_spools = _http_json("GET", f"{SPOOLMAN_URL}/api/v1/spool") or []
+    migrated = migrate_lot_nr_to_tag(sm_spools)
+    if migrated:
+        sm_spools = _http_json("GET", f"{SPOOLMAN_URL}/api/v1/spool") or []
+    if not COST_SYNC:
+        log.info("Sync done: migrated=%d (cost sync disabled, COST_SYNC=0)", migrated)
+        return
     bb_spools = _http_json("GET", f"{BAMBUDDY_URL}/api/v1/inventory/spools") or []
 
     # Index Bambuddy spools by both 32-char tray_uuid and 16-char tag_uid, since
@@ -121,8 +174,8 @@ def sync_once() -> None:
             log.error("PATCH failed for Bambuddy id=%s: %s", bb.get("id"), e.reason)
 
     log.info(
-        "Sync done: updated=%d, in_sync=%d, no_price=%d, no_tag=%d, no_match=%d (Spoolman total=%d, Bambuddy total=%d)",
-        updated, in_sync, skipped_no_price, skipped_no_tag, skipped_no_match,
+        "Sync done: migrated=%d, updated=%d, in_sync=%d, no_price=%d, no_tag=%d, no_match=%d (Spoolman total=%d, Bambuddy total=%d)",
+        migrated, updated, in_sync, skipped_no_price, skipped_no_tag, skipped_no_match,
         len(sm_spools), len(bb_spools),
     )
 
